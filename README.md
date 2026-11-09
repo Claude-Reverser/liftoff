@@ -23,7 +23,20 @@ daemons, a private database, and a whole XPC protocol, and it still can't list
 - raw AppKit + Core Animation from Rust via `objc2`. no Electron, no SwiftUI, no web view
 - ~500 KB binary, no dependencies outside macOS itself
 
-## install
+## download
+
+Grab `Liftoff-x.y.z.dmg` from [Releases](../../releases/latest), drag it into Applications, open it, hit ⌥Space.
+
+It's not notarized (not paying Apple $99 a year to say fuck you to them), so the first time macOS will whine.
+Right-click → Open, or:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Liftoff.app
+```
+
+Want it at login: System Settings → General → Login Items → add Liftoff. Or use `./install.sh` below, which does that for you.
+
+## build from source
 
 Apple Silicon, macOS 14+, Rust toolchain.
 

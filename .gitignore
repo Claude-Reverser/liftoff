@@ -1,3 +1,4 @@
 /target
 assets/*.icns
 .DS_Store
+/dist
