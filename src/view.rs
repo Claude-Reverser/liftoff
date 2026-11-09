@@ -112,19 +112,19 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
 }
 
-fn gray(g: f64, a: f64) -> CFRetained<CGColor> {
+pub(crate) fn gray(g: f64, a: f64) -> CFRetained<CGColor> {
     CGColor::new_generic_gray(g, a)
 }
 
-fn as_obj<T>(r: &T) -> &AnyObject {
+pub(crate) fn as_obj<T>(r: &T) -> &AnyObject {
     unsafe { &*(r as *const T as *const AnyObject) }
 }
 
-fn ease_out() -> Retained<CAMediaTimingFunction> {
+pub(crate) fn ease_out() -> Retained<CAMediaTimingFunction> {
     CAMediaTimingFunction::functionWithControlPoints(0.2, 0.9, 0.3, 1.0)
 }
 
-fn no_anim<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) fn no_anim<R>(f: impl FnOnce() -> R) -> R {
     CATransaction::begin();
     CATransaction::setDisableActions(true);
     let r = f();
@@ -132,7 +132,7 @@ fn no_anim<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
-fn animated<R>(dur: f64, f: impl FnOnce() -> R) -> R {
+pub(crate) fn animated<R>(dur: f64, f: impl FnOnce() -> R) -> R {
     CATransaction::begin();
     CATransaction::setAnimationDuration(dur);
     CATransaction::setAnimationTimingFunction(Some(&ease_out()));
@@ -1546,7 +1546,7 @@ fn perform(act: Act) {
     }
 }
 
-fn mouse_screen(mtm: MainThreadMarker) -> Option<Retained<NSScreen>> {
+pub(crate) fn mouse_screen(mtm: MainThreadMarker) -> Option<Retained<NSScreen>> {
     let m = NSEvent::mouseLocation();
     NSScreen::screens(mtm)
         .iter()
@@ -1574,6 +1574,7 @@ pub fn toggle() {
 }
 
 pub fn show() {
+    crate::search::hide();
     let t0 = Instant::now();
     let mtm = MainThreadMarker::new().unwrap();
     let apps = index::scan();
@@ -1653,8 +1654,10 @@ pub fn hide() {
             return;
         };
         window.orderOut(None);
-        let mtm = MainThreadMarker::new().unwrap();
-        NSApplication::sharedApplication(mtm).hide(None);
+        if !crate::search::is_visible() {
+            let mtm = MainThreadMarker::new().unwrap();
+            NSApplication::sharedApplication(mtm).hide(None);
+        }
     });
 }
 
@@ -1920,4 +1923,16 @@ pub fn watch_launches() {
         )
     };
     std::mem::forget(token);
+}
+
+pub fn usage_snapshot() -> HashMap<String, u32> {
+    with(|st| st.usage.clone()).unwrap_or_default()
+}
+
+pub fn note_open(path: &str) {
+    with(|st| {
+        if !st.by_path.contains_key(path) || is_running(path) {
+            st.note_use(path);
+        }
+    });
 }

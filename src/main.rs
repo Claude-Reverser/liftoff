@@ -1,6 +1,9 @@
+mod calc;
+mod files;
 mod icons;
 mod index;
 mod layout;
+mod search;
 mod view;
 
 use std::ffi::c_void;
@@ -36,6 +39,15 @@ unsafe extern "C" {
         user_data: *mut c_void,
         out_ref: *mut *mut c_void,
     ) -> i32;
+    fn GetEventParameter(
+        event: *mut c_void,
+        name: u32,
+        desired: u32,
+        actual: *mut u32,
+        size: usize,
+        actual_size: *mut usize,
+        data: *mut c_void,
+    ) -> i32;
     fn RegisterEventHotKey(
         key_code: u32,
         modifiers: u32,
@@ -53,8 +65,22 @@ const SHIFT: u32 = 1 << 9;
 const OPT: u32 = 1 << 11;
 const CTRL: u32 = 1 << 12;
 
-extern "C" fn on_hotkey(_: *mut c_void, _: *mut c_void, _: *mut c_void) -> i32 {
-    view::toggle();
+const SEARCH_ID: u32 = 1000;
+
+extern "C" fn on_hotkey(_: *mut c_void, event: *mut c_void, _: *mut c_void) -> i32 {
+    let mut id = EventHotKeyID { signature: 0, id: 0 };
+    unsafe {
+        GetEventParameter(
+            event,
+            u32::from_be_bytes(*b"----"),
+            u32::from_be_bytes(*b"hkid"),
+            std::ptr::null_mut(),
+            std::mem::size_of::<EventHotKeyID>(),
+            std::ptr::null_mut(),
+            &mut id as *mut _ as *mut c_void,
+        );
+    }
+    if id.id >= SEARCH_ID { search::toggle() } else { view::toggle() }
     0
 }
 
@@ -93,16 +119,20 @@ fn keycode(k: &str) -> Option<u32> {
     })
 }
 
-fn config_hotkeys() -> Vec<String> {
+fn config_hotkeys(file: &str, defaults: &[&str]) -> Vec<String> {
     let h = std::env::var_os("HOME").unwrap_or_default();
-    let p = std::path::Path::new(&h).join("Library/Application Support/Liftoff/hotkeys");
+    let p = std::path::Path::new(&h).join("Library/Application Support/Liftoff").join(file);
     match std::fs::read_to_string(&p) {
         Ok(s) => s.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect(),
         Err(_) => {
-            let def = "# one hotkey per line, e.g. opt+space, cmd+shift+l, f4\nopt+space\nlaunchpad\n";
+            let mut def = String::from("# one hotkey per line, e.g. opt+space, cmd+shift+l, f4\n");
+            for d in defaults {
+                def.push_str(d);
+                def.push('\n');
+            }
             let _ = std::fs::create_dir_all(p.parent().unwrap());
             let _ = std::fs::write(&p, def);
-            vec!["opt+space".into(), "launchpad".into()]
+            defaults.iter().map(|d| d.to_string()).collect()
         }
     }
 }
@@ -113,12 +143,17 @@ fn register_hotkeys() {
         let spec = EventTypeSpec { class: K_EVENT_CLASS_KEYBOARD, kind: K_EVENT_HOTKEY_PRESSED };
         let mut h = std::ptr::null_mut();
         InstallEventHandler(target, on_hotkey, 1, &spec, std::ptr::null_mut(), &mut h);
-        for (i, hk) in config_hotkeys().iter().enumerate() {
+        let launcher = config_hotkeys("hotkeys", &["opt+space", "launchpad"]);
+        let finder = config_hotkeys("search-hotkeys", &["cmd+space"]);
+        let all = launcher.iter().enumerate().map(|(i, h)| (i as u32, h)).chain(
+            finder.iter().enumerate().map(|(i, h)| (SEARCH_ID + i as u32, h)),
+        );
+        for (i, hk) in all {
             let Some((code, mods)) = parse_hotkey(hk) else {
                 eprintln!("liftoff: can't parse hotkey {hk:?}");
                 continue;
             };
-            let id = EventHotKeyID { signature: u32::from_be_bytes(*b"LFTO"), id: i as u32 };
+            let id = EventHotKeyID { signature: u32::from_be_bytes(*b"LFTO"), id: i };
             let mut r = std::ptr::null_mut();
             let err = RegisterEventHotKey(code, mods, id, target, 0, &mut r);
             if err != 0 {
@@ -142,9 +177,14 @@ define_class!(
             let mtm = MainThreadMarker::new().unwrap();
             view::setup(mtm);
             view::watch_launches();
+            search::setup(mtm);
+            files::start();
             register_hotkeys();
             if std::env::args().any(|a| a == "--show") {
                 view::show();
+            }
+            if std::env::args().any(|a| a == "--search") {
+                search::show();
             }
         }
 
@@ -157,6 +197,7 @@ define_class!(
         #[unsafe(method(applicationDidResignActive:))]
         fn did_resign_active(&self, _n: &NSNotification) {
             view::hide();
+            search::hide();
         }
     }
 );

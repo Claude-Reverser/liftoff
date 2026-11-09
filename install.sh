@@ -46,6 +46,15 @@ cat > "$AGENT" <<PL
   <key>StandardErrorPath</key><string>/tmp/liftoff.log</string>
 </dict></plist>
 PL
-launchctl bootout gui/$(id -u)/app.liftoff.launcher 2>/dev/null || true
+# spotlight holds cmd+space hostage. take it back (LIFTOFF_KEEP_SPOTLIGHT=1 to skip)
+if [[ -z "$LIFTOFF_KEEP_SPOTLIGHT" ]]; then
+  defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 64 \
+    '<dict><key>enabled</key><false/><key>value</key><dict><key>parameters</key><array><integer>32</integer><integer>49</integer><integer>1048576</integer></array><key>type</key><string>standard</string></dict></dict>'
+  /System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u 2>/dev/null || true
+fi
+
+launchctl bootout gui/$(id -u)/app.liftoff.launcher 2>/dev/null && sleep 1 || true
 launchctl bootstrap gui/$(id -u) "$AGENT"
-echo "installed: $APP (hotkeys in ~/Library/Application Support/Liftoff/hotkeys)"
+echo "installed: $APP"
+echo "launcher hotkeys: ~/Library/Application Support/Liftoff/hotkeys"
+echo "search hotkeys:   ~/Library/Application Support/Liftoff/search-hotkeys (default cmd+space)"
