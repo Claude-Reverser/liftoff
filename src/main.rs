@@ -1,4 +1,6 @@
+mod browse;
 mod calc;
+mod dir;
 mod files;
 mod icons;
 mod index;
@@ -66,6 +68,7 @@ const OPT: u32 = 1 << 11;
 const CTRL: u32 = 1 << 12;
 
 const SEARCH_ID: u32 = 1000;
+const FILES_ID: u32 = 2000;
 
 extern "C" fn on_hotkey(_: *mut c_void, event: *mut c_void, _: *mut c_void) -> i32 {
     let mut id = EventHotKeyID { signature: 0, id: 0 };
@@ -80,7 +83,13 @@ extern "C" fn on_hotkey(_: *mut c_void, event: *mut c_void, _: *mut c_void) -> i
             &mut id as *mut _ as *mut c_void,
         );
     }
-    if id.id >= SEARCH_ID { search::toggle() } else { view::toggle() }
+    if id.id >= FILES_ID {
+        browse::toggle()
+    } else if id.id >= SEARCH_ID {
+        search::toggle()
+    } else {
+        view::toggle()
+    }
     0
 }
 
@@ -145,9 +154,13 @@ fn register_hotkeys() {
         InstallEventHandler(target, on_hotkey, 1, &spec, std::ptr::null_mut(), &mut h);
         let launcher = config_hotkeys("hotkeys", &["opt+space", "launchpad"]);
         let finder = config_hotkeys("search-hotkeys", &["cmd+space"]);
-        let all = launcher.iter().enumerate().map(|(i, h)| (i as u32, h)).chain(
-            finder.iter().enumerate().map(|(i, h)| (SEARCH_ID + i as u32, h)),
-        );
+        let browser = config_hotkeys("files-hotkeys", &["opt+shift+space"]);
+        let all = launcher
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (i as u32, h))
+            .chain(finder.iter().enumerate().map(|(i, h)| (SEARCH_ID + i as u32, h)))
+            .chain(browser.iter().enumerate().map(|(i, h)| (FILES_ID + i as u32, h)));
         for (i, hk) in all {
             let Some((code, mods)) = parse_hotkey(hk) else {
                 eprintln!("liftoff: can't parse hotkey {hk:?}");
@@ -175,6 +188,7 @@ define_class!(
         #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = MainThreadMarker::new().unwrap();
+            NSApplication::sharedApplication(mtm).setMainMenu(Some(&browse::edit_menu(mtm)));
             view::setup(mtm);
             view::watch_launches();
             search::setup(mtm);
@@ -182,6 +196,9 @@ define_class!(
             register_hotkeys();
             if std::env::args().any(|a| a == "--show") {
                 view::show();
+            }
+            if std::env::args().any(|a| a == "--files") {
+                browse::open(None);
             }
             if std::env::args().any(|a| a == "--search") {
                 search::show();
@@ -205,6 +222,25 @@ define_class!(
 fn main() {
     let mtm = MainThreadMarker::new().expect("must run on main thread");
     let app = NSApplication::sharedApplication(mtm);
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--snapshot") {
+        // liftoff --snapshot <folder> <out.png> [steps]: draws the files window into a png, never shows it
+        app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+        let get = |k: usize| args.get(i + k).map(String::as_str).unwrap_or("");
+        browse::snapshot(get(1), get(2), get(3));
+        return;
+    }
+    // the launcher and the search panel, drawn off screen into a png
+    if let Some(i) = args.iter().position(|a| a == "--snapshot-launcher" || a == "--snapshot-search") {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+        let get = |k: usize| args.get(i + k).map(String::as_str).unwrap_or("");
+        if args[i] == "--snapshot-launcher" {
+            view::snapshot(get(1));
+        } else {
+            search::snapshot(get(1), get(2), get(3));
+        }
+        return;
+    }
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
     let delegate: Retained<Delegate> = unsafe { msg_send![Delegate::alloc(mtm), init] };
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

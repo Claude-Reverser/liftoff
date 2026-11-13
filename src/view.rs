@@ -141,6 +141,27 @@ pub(crate) fn animated<R>(dur: f64, f: impl FnOnce() -> R) -> R {
     r
 }
 
+// moves a layer to a new frame on a spring with no bounce, starting from wherever it
+// is on screen right now, so a run of quick moves (an arrow key held down) is one
+// smooth trip instead of a string of hops
+pub(crate) fn glide(l: &CALayer, to: CGRect, feel: f64) {
+    let from = unsafe { l.presentationLayer() }.map_or(l.position(), |p| p.position());
+    no_anim(|| l.setFrame(to));
+    let now = l.position();
+    for (key, a, b) in [("position.x", from.x, now.x), ("position.y", from.y, now.y)] {
+        if (a - b).abs() > 0.5 {
+            let sp = objc2_quartz_core::CASpringAnimation::initWithPerceptualDuration_bounce(<objc2_quartz_core::CASpringAnimation as objc2::AnyThread>::alloc(), feel, 0.0);
+            sp.setKeyPath(Some(&NSString::from_str(key)));
+            unsafe {
+                sp.setFromValue(Some(&NSNumber::new_f64(a)));
+                sp.setToValue(Some(&NSNumber::new_f64(b)));
+            }
+            sp.setDuration(sp.settlingDuration());
+            l.addAnimation_forKey(&sp, Some(&NSString::from_str(key)));
+        }
+    }
+}
+
 fn pop_in(layer: &CALayer, from_scale: f64, dur: f64) {
     let tf = ease_out();
     let scale = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("transform.scale")));
@@ -671,15 +692,24 @@ impl State {
         rect(cx - w / 2.0, cy - cell_h / 2.0 + ir.origin.y - 11.0 + (cell_h - g.cell_h) / 2.0, w, h)
     }
 
+    // the highlight slides from one app to the next instead of blinking across
     fn update_sel(&self) {
-        no_anim(|| match self.sel {
+        let l = &self.sel_layer;
+        match self.sel {
             Some(pos) if self.drag.is_none() => {
                 let (x, y) = self.geo.center(pos + self.base());
-                self.sel_layer.setFrame(self.highlight_rect(x, y, self.geo.cell_h));
-                self.sel_layer.setHidden(false);
+                let to = self.highlight_rect(x, y, self.geo.cell_h);
+                if l.isHidden() {
+                    no_anim(|| {
+                        l.setFrame(to);
+                        l.setHidden(false);
+                    });
+                } else {
+                    glide(l, to, 0.22);
+                }
             }
-            _ => self.sel_layer.setHidden(true),
-        });
+            _ => no_anim(|| l.setHidden(true)),
+        }
     }
 
     fn update_merge(&mut self) {
@@ -897,6 +927,9 @@ impl State {
             self.dim.setHidden(false);
             self.panel.setHidden(false);
             self.panel.setOpacity(1.0);
+            // it may still be on its way out from the last close
+            self.panel.removeAllAnimations();
+            self.panel.setTransform(unsafe { CATransform3DIdentity });
         });
         pop_in(&self.panel, 0.92, 0.24);
         animated(0.2, || self.content.setOpacity(0.12));
@@ -914,10 +947,30 @@ impl State {
                     t.layer.setHidden(true);
                 }
             }
-            self.panel.setHidden(true);
             self.dim.setHidden(true);
             self.panel_sel.setHidden(true);
         });
+        // the folder sinks back a touch and fades, quicker than it opened
+        let away = CAMediaTimingFunction::functionWithControlPoints(0.4, 0.0, 1.0, 1.0);
+        CATransaction::begin();
+        CATransaction::setAnimationDuration(0.14);
+        CATransaction::setAnimationTimingFunction(Some(&away));
+        let done = block2::RcBlock::new(|| {
+            with(|st| {
+                if st.open.is_none() {
+                    no_anim(|| {
+                        st.panel.setHidden(true);
+                        st.panel.setOpacity(1.0);
+                        st.panel.setTransform(unsafe { CATransform3DIdentity });
+                    });
+                }
+            });
+        });
+        // safety: the block is a plain rust closure with nothing borrowed
+        unsafe { CATransaction::setCompletionBlock(Some(&done)) };
+        self.panel.setOpacity(0.0);
+        self.panel.setTransform(CATransform3D::new_scale(0.96, 0.96, 1.0));
+        CATransaction::commit();
         animated(0.2, || self.content.setOpacity(1.0));
         let before = self.items.len();
         layout::normalize(&mut self.items);
@@ -1654,7 +1707,7 @@ pub fn hide() {
             return;
         };
         window.orderOut(None);
-        if !crate::search::is_visible() {
+        if !crate::search::is_visible() && !crate::browse::is_open() {
             let mtm = MainThreadMarker::new().unwrap();
             NSApplication::sharedApplication(mtm).hide(None);
         }
@@ -1781,20 +1834,19 @@ pub fn setup(mtm: MainThreadMarker) {
     root.addSublayer(&drag_layer);
 
     let fav_band = CALayer::new();
-    fav_band.setBackgroundColor(Some(&gray(1.0, 0.07)));
-    fav_band.setBorderColor(Some(&gray(1.0, 0.1)));
-    fav_band.setBorderWidth(0.5);
+    // a soft shelf for the apps you use most. no outline: the shade alone sets it apart
+    fav_band.setBackgroundColor(Some(&gray(1.0, 0.06)));
     fav_band.setCornerRadius(22.0);
     fav_band.setHidden(true);
     pages.insertSublayer_atIndex(&fav_band, 0);
     let fav_caption = CATextLayer::new();
-    let cfont = NSFont::systemFontOfSize_weight(11.0, unsafe { NSFontWeightSemibold });
+    let cfont = NSFont::systemFontOfSize_weight(12.0, unsafe { NSFontWeightSemibold });
     unsafe {
         fav_caption.setFont(Some(&*(Retained::as_ptr(&cfont) as *const CFType)));
-        fav_caption.setString(Some(&NSString::from_str("FREQUENTLY USED")));
+        fav_caption.setString(Some(&NSString::from_str("Frequently used")));
     }
-    fav_caption.setFontSize(11.0);
-    fav_caption.setForegroundColor(Some(&gray(1.0, 0.5)));
+    fav_caption.setFontSize(12.0);
+    fav_caption.setForegroundColor(Some(&gray(1.0, 0.55)));
     fav_caption.setContentsScale(scale);
     fav_caption.setHidden(true);
     pages.addSublayer(&fav_caption);
@@ -1935,4 +1987,59 @@ pub fn note_open(path: &str) {
             st.note_use(path);
         }
     });
+}
+
+// draws a layer tree into a png with no window on screen. for checking the launcher
+// and the search panel without taking over anyone's display. blurs and filters don't
+// survive this, so `bg` stands in for whatever would be behind
+pub(crate) fn render_layer(layer: &CALayer, w: f64, h: f64, scale: f64, bg: (f64, f64, f64), out: &str) -> bool {
+    use objc2_core_graphics::{CGColorSpace, CGContext};
+    unsafe extern "C" {
+        fn CGBitmapContextCreate(data: *mut std::ffi::c_void, width: usize, height: usize, bpc: usize, bpr: usize, space: *const CGColorSpace, info: u32) -> *mut CGContext;
+    }
+    let (pw, ph) = ((w * scale).round() as usize, (h * scale).round() as usize);
+    let Some(cs) = CGColorSpace::new_device_rgb() else { return false };
+    let raw = unsafe { CGBitmapContextCreate(std::ptr::null_mut(), pw, ph, 8, 0, &*cs, 2 | (2 << 12)) };
+    let Some(ctx) = std::ptr::NonNull::new(raw).map(|p| unsafe { CFRetained::from_raw(p) }) else { return false };
+    let fill = CGColor::new_srgb(bg.0, bg.1, bg.2, 1.0);
+    CGContext::set_fill_color_with_color(Some(&ctx), Some(&fill));
+    CGContext::fill_rect(Some(&ctx), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(pw as f64, ph as f64)));
+    // core animation draws top-down into a bottom-up bitmap, so turn the page over first
+    CGContext::translate_ctm(Some(&ctx), 0.0, ph as f64);
+    CGContext::scale_ctm(Some(&ctx), scale, -scale);
+    layer.renderInContext(&ctx);
+    let Some(img) = objc2_core_graphics::CGBitmapContextCreateImage(Some(&ctx)) else { return false };
+    let rep = objc2_app_kit::NSBitmapImageRep::initWithCGImage(<objc2_app_kit::NSBitmapImageRep as objc2::AnyThread>::alloc(), &img);
+    let data = unsafe { rep.representationUsingType_properties(objc2_app_kit::NSBitmapImageFileType::PNG, &objc2_foundation::NSDictionary::new()) };
+    data.is_some_and(|d| d.writeToFile_atomically(&NSString::from_str(out), true))
+}
+
+// liftoff --snapshot-launcher <out.png>: the grid as it would open, drawn off screen
+pub fn snapshot(out: &str) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    setup(mtm);
+    let apps = index::scan();
+    let frame = NSScreen::mainScreen(mtm).map(|s| s.frame());
+    let Some((jobs, px)) = with(|st| {
+        let jobs = st.sync_apps(apps);
+        if let Some(f) = frame {
+            st.set_geo(Geo::new(f.size.width, f.size.height));
+        }
+        st.query.clear();
+        st.compute_favs();
+        st.refilter();
+        (jobs, st.icon_px)
+    }) else {
+        return;
+    };
+    spawn_icons(jobs, px);
+    let spin = |secs: f64| objc2_foundation::NSRunLoop::currentRunLoop().runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(secs));
+    spin(2.5);
+    let ok = with(|st| {
+        let root = st.content.superlayer().unwrap_or_else(|| st.content.clone());
+        let b = root.bounds().size;
+        let scale = st.window.backingScaleFactor();
+        render_layer(&root, b.width, b.height, scale, (0.16, 0.18, 0.24), out)
+    });
+    eprintln!("snapshot-launcher: wrote={ok:?}");
 }

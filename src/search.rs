@@ -24,9 +24,9 @@ use objc2_foundation::{
 };
 use objc2_core_graphics::{CGColor, CGMutablePath, CGPath};
 use objc2_quartz_core::{
-    kCAAlignmentCenter, kCAAlignmentLeft, kCAFillModeBackwards, kCAFilterTrilinear,
+    kCAAlignmentCenter, kCAAlignmentLeft, kCAFilterTrilinear,
     kCAGravityResizeAspect, kCATruncationEnd, kCATruncationMiddle,
-    CABasicAnimation, CACurrentMediaTime, CAGradientLayer, CALayer, CAMediaTiming,
+    CABasicAnimation, CALayer, CAMediaTiming,
     CAKeyframeAnimation, CAMediaTimingFunction, CAShapeLayer, CATextLayer, CATransaction,
     kCAFillRuleEvenOdd,
 };
@@ -51,7 +51,7 @@ const ICON: f64 = 32.0;
 const WEB: usize = 0;
 const FILES: usize = 1;
 const APPS: usize = 2;
-const TITLES: [&str; 3] = ["WEB", "FILES", "APPS"];
+const TITLES: [&str; 3] = ["Web", "Files", "Apps"];
 
 fn col_w() -> f64 {
     (W - 2.0 * PAD - 2.0 * GAP) / 3.0
@@ -146,8 +146,10 @@ fn cut_path(r: CGRect) -> CFRetained<CGPath> {
     }
 }
 
+// the panel opening, the columns trading places: fast off the mark and a long soft
+// landing, no bounce. a search bar that wobbles when you press a key is showing off
 fn springy() -> Retained<CAMediaTimingFunction> {
-    CAMediaTimingFunction::functionWithControlPoints(0.32, 1.32, 0.42, 1.0)
+    CAMediaTimingFunction::functionWithControlPoints(0.22, 1.0, 0.36, 1.0)
 }
 
 fn rim_path(r: CGRect) -> CFRetained<CGPath> {
@@ -284,7 +286,7 @@ struct S {
     blur: Retained<NSVisualEffectView>,
     field: Retained<NSTextField>,
     content: Retained<CALayer>,
-    sel_layer: Retained<CAGradientLayer>,
+    sel_layer: Retained<CALayer>,
     panes: Vec<Pane>,
     sel: (usize, usize),
     icons: HashMap<String, CFRetained<CGImage>>,
@@ -559,13 +561,9 @@ impl S {
         if fade {
             let (p, r) = self.sel;
             let shown = !self.panes[p].items.is_empty() && !self.query.trim().is_empty();
-            let fr = self.row_rect(p, r - self.panes[p].top);
-            let first = self.sel_layer.isHidden();
-            let set = || {
-                self.sel_layer.setFrame(fr);
-                self.sel_layer.setHidden(!shown);
-            };
-            if first { no_anim(set) } else { animated(0.16, set) }
+            let row = self.row_rect(p, r - self.panes[p].top);
+            let fr = rect(row.origin.x + 4.0, row.origin.y + 1.0, row.size.width - 8.0, row.size.height - 2.0);
+            self.place_sel(fr, shown);
         } else {
             no_anim(|| self.sel_layer.setHidden(true));
         }
@@ -625,10 +623,9 @@ impl S {
         self.blur.animator().setFrame(r);
         NSAnimationContext::endGrouping();
         self.glow.morph(rect(r.origin.x, r.origin.y, r.size.width, r.size.height), dur, &tf);
+        // the results come in as one piece while the panel opens. no rows flying in one
+        // after the other
         animated(if on { 0.2 } else { 0.12 }, || self.content.setOpacity(if on { 1.0 } else { 0.0 }));
-        if on {
-            self.cascade();
-        }
         later(340, || {
             with(|s| s.window.invalidateShadow());
         });
@@ -683,20 +680,24 @@ impl S {
         self.ghost.setHidden(room < 40.0);
     }
 
-    fn cascade(&self) {
-        let now = CACurrentMediaTime();
-        let tf = springy();
-        for (c, pane) in self.panes.iter().enumerate() {
-            for (i, row) in pane.rows.iter().enumerate() {
-                let delay = 0.07 + self.col(c) as f64 * 0.045 + i as f64 * 0.022;
-                for (key, from, to) in [("opacity", 0.0, 1.0), ("transform.translation.y", 14.0, 0.0)] {
-                    let a = anim(key, &NSNumber::new_f64(from), &NSNumber::new_f64(to), 0.42, &tf);
-                    a.setBeginTime(now + delay);
-                    unsafe { a.setFillMode(kCAFillModeBackwards) };
-                    row.layer.addAnimation_forKey(&a, Some(&NSString::from_str(key)));
-                }
-            }
+    // the plate glides to the new row on a spring with no bounce, starting from wherever
+    // it is on screen, so holding an arrow key makes it run smoothly instead of hopping.
+    // when it first turns up it just fades in where it belongs
+    fn place_sel(&self, fr: CGRect, shown: bool) {
+        let l = &self.sel_layer;
+        if !shown {
+            no_anim(|| l.setHidden(true));
+            return;
         }
+        if l.isHidden() {
+            no_anim(|| {
+                l.setFrame(fr);
+                l.setHidden(false);
+            });
+            l.addAnimation_forKey(&anim("opacity", &NSNumber::new_f64(0.0), &NSNumber::new_f64(1.0), 0.12, &ease_out()), Some(&NSString::from_str("in")));
+            return;
+        }
+        view::glide(l, fr, 0.22);
     }
 
     fn move_sel(&mut self, d: isize) {
@@ -887,7 +888,9 @@ fn activate(at: Option<(usize, usize)>, mods: NSEventModifierFlags) {
         Do::Open(p) => {
             let url = NSURL::fileURLWithPath(&NSString::from_str(&p));
             if cmd {
-                ws.activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
+                hide();
+                crate::browse::open(Some(&p));
+                return;
             } else if opt {
                 copy(&p);
             } else {
@@ -1154,22 +1157,18 @@ pub fn setup(mtm: MainThreadMarker) {
         d.setBackgroundColor(Some(&gray(1.0, 0.08)));
         content.addSublayer(&d);
     }
-    let sel_layer = CAGradientLayer::new();
-    sel_layer.setCornerRadius(12.0);
-    let sc = [CGColor::new_srgb(0.24, 0.48, 1.0, 0.85), CGColor::new_srgb(0.55, 0.36, 1.0, 0.85)];
-    let sr: Vec<&AnyObject> = sc.iter().map(|c| as_obj(&**c)).collect();
-    unsafe { sel_layer.setColors(Some(&NSArray::from_slice(&sr))) };
-    sel_layer.setStartPoint(CGPoint::new(0.0, 0.5));
-    sel_layer.setEndPoint(CGPoint::new(1.0, 0.5));
-    sel_layer.setBorderWidth(0.5);
-    sel_layer.setBorderColor(Some(&gray(1.0, 0.25)));
+    // the selection: a quiet plate of light behind the row, nothing more. it used to be
+    // a blue-to-violet gradient with a white rim, which is what every generated ui does
+    let sel_layer = CALayer::new();
+    sel_layer.setCornerRadius(10.0);
+    sel_layer.setBackgroundColor(Some(&gray(1.0, 0.12)));
     sel_layer.setHidden(true);
     content.addSublayer(&sel_layer);
 
     let order = [APPS, FILES, WEB];
     let mut panes = Vec::new();
     for c in 0..3 {
-        let header = text_layer(11.0, unsafe { NSFontWeightSemibold }, 0.45, scale);
+        let header = text_layer(12.0, unsafe { NSFontWeightSemibold }, 0.55, scale);
         header.setFrame(rect(col_x(c) + 12.0, BAR_H + 14.0, 120.0, 16.0));
         set_text(&header, TITLES[c]);
         content.addSublayer(&header);
@@ -1347,13 +1346,41 @@ pub fn hide() {
             return;
         }
         with(|s| s.window.orderOut(None));
-        if !view::is_visible() {
+        if !view::is_visible() && !crate::browse::is_open() {
             let mtm = MainThreadMarker::new().unwrap();
             NSApplication::sharedApplication(mtm).hide(None);
         }
     });
 }
 
+
+// liftoff --snapshot-search <out.png> <query> [moves]: the results panel for a query,
+// drawn off screen. moves like "dd" (down) or "r" (next column) pick a row first
+pub fn snapshot(out: &str, query: &str, moves: &str) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    setup(mtm);
+    let spin = |secs: f64| objc2_foundation::NSRunLoop::currentRunLoop().runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(secs));
+    with(|s| {
+        s.field.setStringValue(&NSString::from_str(query));
+        s.update(query.to_owned());
+    });
+    for c in moves.chars() {
+        with(|s| match c {
+            'd' => s.move_sel(1),
+            'u' => s.move_sel(-1),
+            'r' => s.cycle(1),
+            'l' => s.cycle(-1),
+            _ => {}
+        });
+    }
+    spin(1.2);
+    let ok = with(|s| {
+        no_anim(|| s.content.setOpacity(1.0));
+        let scale = s.scale;
+        view::render_layer(&s.content, W, EXP_H, scale, (0.15, 0.15, 0.17), out)
+    });
+    eprintln!("snapshot-search: wrote={ok:?}");
+}
 
 #[cfg(test)]
 mod tests {
