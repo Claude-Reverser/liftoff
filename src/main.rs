@@ -235,9 +235,9 @@ fn main() {
         app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
         let get = |k: usize| args.get(i + k).map(String::as_str).unwrap_or("");
         if args[i] == "--snapshot-launcher" {
-            view::snapshot(get(1));
+            view::snapshot(get(1), get(2) == "demo");
         } else {
-            search::snapshot(get(1), get(2), get(3));
+            search::snapshot(get(1), get(2), get(3), get(4) == "demo");
         }
         return;
     }

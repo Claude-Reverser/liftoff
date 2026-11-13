@@ -30,7 +30,10 @@ const BYTE_ORDER_32_LITTLE: u32 = 2 << 12;
 pub fn render(path: &str, px: usize) -> Option<CFRetained<CGImage>> {
     autoreleasepool(|_| {
         let ws = NSWorkspace::sharedWorkspace();
-        let img = ws.iconForFile(&NSString::from_str(path));
+        // safari in /Applications is a link into the system cryptex now. ask for the icon
+        // of the link and you get the little alias arrow stamped on it
+        let real = std::fs::canonicalize(path).ok().and_then(|p| p.to_str().map(str::to_owned)).unwrap_or_else(|| path.to_owned());
+        let img = ws.iconForFile(&NSString::from_str(&real));
         let mut rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(px as f64, px as f64));
         let src = unsafe { img.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
         let cs = CGColorSpace::new_device_rgb()?;

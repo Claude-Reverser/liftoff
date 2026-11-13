@@ -1354,16 +1354,44 @@ pub fn hide() {
 }
 
 
-// liftoff --snapshot-search <out.png> <query> [moves]: the results panel for a query,
-// drawn off screen. moves like "dd" (down) or "r" (next column) pick a row first
-pub fn snapshot(out: &str, query: &str, moves: &str) {
+// liftoff --snapshot-search <out.png> <query> [moves] [demo]: the search panel for a
+// query, drawn off screen. moves like "dd" (down) or "r" (next column) pick a row first.
+// writes the pieces next to <out> (glow ring, its mask, the shadow, the results, the
+// field) because the glass and the glow's blur only exist on a real screen; whoever
+// puts them together blurs the ring the same way. "demo" shows only apple's own apps
+// and files from $HOME, for pictures that go public
+pub fn snapshot(out: &str, query: &str, moves: &str, demo: bool) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     setup(mtm);
     let spin = |secs: f64| objc2_foundation::NSRunLoop::currentRunLoop().runUntilDate(&objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(secs));
-    with(|s| {
-        s.field.setStringValue(&NSString::from_str(query));
-        s.update(query.to_owned());
-    });
+    if demo {
+        files::start();
+        spin(2.0);
+        with(|s| {
+            s.apps.retain(|a| a.path.starts_with("/System/Applications/") || a.path == "/Applications/Safari.app");
+            // whatever browser this mac uses is nobody's business
+            s.browser = Some("/Applications/Safari.app".into());
+        });
+    }
+    let ask = || {
+        with(|s| {
+            s.field.setStringValue(&NSString::from_str(query));
+            s.query.clear();
+            s.update(query.to_owned());
+        });
+    };
+    ask();
+    // suggestions come back from the network and icons from other threads
+    spin(3.0);
+    ask();
+    if demo {
+        // the indexer also crawls mounted disks. a public picture only shows $HOME
+        let h = std::env::var("HOME").unwrap_or_default();
+        with(|s| {
+            s.panes[FILES].items.retain(|r| matches!(&r.act, Do::Open(p) if p.starts_with(&h)));
+            s.render(true);
+        });
+    }
     for c in moves.chars() {
         with(|s| match c {
             'd' => s.move_sel(1),
@@ -1375,9 +1403,70 @@ pub fn snapshot(out: &str, query: &str, moves: &str) {
     }
     spin(1.2);
     let ok = with(|s| {
-        no_anim(|| s.content.setOpacity(1.0));
-        let scale = s.scale;
-        view::render_layer(&s.content, W, EXP_H, scale, (0.15, 0.15, 0.17), out)
+        let scale = s.scale.max(2.0);
+        let panel = s.panel_rect(true);
+        s.blur.setFrame(panel);
+        no_anim(|| {
+            s.content.setOpacity(1.0);
+            s.glow.place(rect(panel.origin.x, panel.origin.y, panel.size.width, panel.size.height));
+            // the ring's colours normally travel round it. stop them where they'd be at the
+            // start of a lap, as plain colours a still picture can hold
+            for (i, l) in s.glow.segs.iter().enumerate() {
+                let f = (1.0 - i as f64 / SEGS as f64).rem_euclid(1.0) * (PALETTE.len() - 1) as f64;
+                let (k, t) = (f.floor() as usize, f.fract());
+                let (a, b) = (PALETTE[k], PALETTE[(k + 1).min(PALETTE.len() - 1)]);
+                l.setStrokeColor(Some(&CGColor::new_srgb(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t, 1.0)));
+            }
+        });
+        let (gw, gh) = (W + 2.0 * M, EXP_H + 2.0 * M);
+        let mut ok = view::render_layer(&s.glow.lit, gw, gh, scale, None, &format!("{out}.ring.png"));
+        ok &= view::render_layer(&s.glow.cut, gw, gh, scale, None, &format!("{out}.cut.png"));
+        ok &= view::render_layer(&s.glow.shadow, gw, gh, scale, None, &format!("{out}.shadow.png"));
+        ok &= view::render_layer(&s.content, W, EXP_H, scale, None, &format!("{out}.content.png"));
+        // the field and the magnifier are ordinary views, drawn the ordinary way
+        let views: Vec<(Retained<NSView>, &str)> = {
+            let subs = s.blur.subviews();
+            let mut v = Vec::new();
+            for i in 0..subs.count() {
+                let sv = subs.objectAtIndex(i);
+                if sv.isKindOfClass(<NSImageView as objc2::ClassType>::class()) {
+                    v.push((sv, "icon"));
+                } else if std::ptr::eq(&*sv, &**s.field as &NSView) {
+                    v.push((sv, "field"));
+                }
+            }
+            v
+        };
+        for (v, name) in views {
+            let b = v.bounds();
+            let rep = unsafe {
+                objc2_app_kit::NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                    <objc2_app_kit::NSBitmapImageRep as AnyThread>::alloc(),
+                    std::ptr::null_mut(),
+                    (b.size.width * scale) as isize,
+                    (b.size.height * scale) as isize,
+                    8,
+                    4,
+                    true,
+                    false,
+                    objc2_app_kit::NSDeviceRGBColorSpace,
+                    0,
+                    0,
+                )
+            };
+            if let Some(rep) = rep {
+                rep.setSize(b.size);
+                v.cacheDisplayInRect_toBitmapImageRep(b, &rep);
+                if let Some(d) = unsafe { rep.representationUsingType_properties(objc2_app_kit::NSBitmapImageFileType::PNG, &NSDictionary::new()) } {
+                    d.writeToFile_atomically(&NSString::from_str(&format!("{out}.{name}.png")), true);
+                }
+            }
+            // where it sits in the panel, measured from the panel's top left
+            let f = v.frame();
+            eprintln!("snapshot-search: {name} at {} {} size {} {}", f.origin.x, panel.size.height - f.origin.y - f.size.height, f.size.width, f.size.height);
+        }
+        eprintln!("snapshot-search: window {gw} {gh} panel at {} {} size {} {} radius {RADIUS} scale {scale}", panel.origin.x, panel.origin.y, panel.size.width, panel.size.height);
+        ok
     });
     eprintln!("snapshot-search: wrote={ok:?}");
 }

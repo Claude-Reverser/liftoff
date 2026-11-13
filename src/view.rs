@@ -534,6 +534,15 @@ impl State {
         if let Some(t) = self.tiles.get(&Key::App(path.clone())) {
             unsafe { t.icon.setContents(Some(as_obj(&*img))) };
         }
+        // the frequently used row has its own tiles. an icon that lands after the grid
+        // opened has to reach those too, or the row sits there blank until next time
+        for (i, p) in self.fav.iter().enumerate() {
+            if *p == path {
+                if let Some(t) = self.fav_tiles.get(i) {
+                    no_anim(|| unsafe { t.icon.setContents(Some(as_obj(&*img))) });
+                }
+            }
+        }
         self.icons.insert(path.clone(), (mtime, img));
         let ids: Vec<u64> = self
             .items
@@ -1992,7 +2001,7 @@ pub fn note_open(path: &str) {
 // draws a layer tree into a png with no window on screen. for checking the launcher
 // and the search panel without taking over anyone's display. blurs and filters don't
 // survive this, so `bg` stands in for whatever would be behind
-pub(crate) fn render_layer(layer: &CALayer, w: f64, h: f64, scale: f64, bg: (f64, f64, f64), out: &str) -> bool {
+pub(crate) fn render_layer(layer: &CALayer, w: f64, h: f64, scale: f64, bg: Option<(f64, f64, f64)>, out: &str) -> bool {
     use objc2_core_graphics::{CGColorSpace, CGContext};
     unsafe extern "C" {
         fn CGBitmapContextCreate(data: *mut std::ffi::c_void, width: usize, height: usize, bpc: usize, bpr: usize, space: *const CGColorSpace, info: u32) -> *mut CGContext;
@@ -2001,9 +2010,11 @@ pub(crate) fn render_layer(layer: &CALayer, w: f64, h: f64, scale: f64, bg: (f64
     let Some(cs) = CGColorSpace::new_device_rgb() else { return false };
     let raw = unsafe { CGBitmapContextCreate(std::ptr::null_mut(), pw, ph, 8, 0, &*cs, 2 | (2 << 12)) };
     let Some(ctx) = std::ptr::NonNull::new(raw).map(|p| unsafe { CFRetained::from_raw(p) }) else { return false };
-    let fill = CGColor::new_srgb(bg.0, bg.1, bg.2, 1.0);
-    CGContext::set_fill_color_with_color(Some(&ctx), Some(&fill));
-    CGContext::fill_rect(Some(&ctx), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(pw as f64, ph as f64)));
+    if let Some(bg) = bg {
+        let fill = CGColor::new_srgb(bg.0, bg.1, bg.2, 1.0);
+        CGContext::set_fill_color_with_color(Some(&ctx), Some(&fill));
+        CGContext::fill_rect(Some(&ctx), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(pw as f64, ph as f64)));
+    }
     // core animation draws top-down into a bottom-up bitmap, so turn the page over first
     CGContext::translate_ctm(Some(&ctx), 0.0, ph as f64);
     CGContext::scale_ctm(Some(&ctx), scale, -scale);
@@ -2014,11 +2025,16 @@ pub(crate) fn render_layer(layer: &CALayer, w: f64, h: f64, scale: f64, bg: (f64
     data.is_some_and(|d| d.writeToFile_atomically(&NSString::from_str(out), true))
 }
 
-// liftoff --snapshot-launcher <out.png>: the grid as it would open, drawn off screen
-pub fn snapshot(out: &str) {
+// liftoff --snapshot-launcher <out.png> [demo]: the grid as it would open, drawn off
+// screen. "demo" keeps only apple's own apps and makes up a frequently used row, for
+// pictures that go public without showing what's installed on this mac
+pub fn snapshot(out: &str, demo: bool) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     setup(mtm);
-    let apps = index::scan();
+    let mut apps = index::scan();
+    if demo {
+        apps.retain(|a| a.path.starts_with("/System/Applications/") || a.path == "/Applications/Safari.app");
+    }
     let frame = NSScreen::mainScreen(mtm).map(|s| s.frame());
     let Some((jobs, px)) = with(|st| {
         let jobs = st.sync_apps(apps);
@@ -2026,6 +2042,14 @@ pub fn snapshot(out: &str) {
             st.set_geo(Geo::new(f.size.width, f.size.height));
         }
         st.query.clear();
+        if demo {
+            st.usage.clear();
+            let made_up = ["/Applications/Safari.app", "Mail", "Messages", "Music", "Notes", "Calendar", "Photos"];
+            for (i, a) in made_up.iter().enumerate() {
+                let p = if a.starts_with('/') { a.to_string() } else { format!("/System/Applications/{a}.app") };
+                st.usage.insert(p, 100 - i as u32);
+            }
+        }
         st.compute_favs();
         st.refilter();
         (jobs, st.icon_px)
@@ -2039,7 +2063,7 @@ pub fn snapshot(out: &str) {
         let root = st.content.superlayer().unwrap_or_else(|| st.content.clone());
         let b = root.bounds().size;
         let scale = st.window.backingScaleFactor();
-        render_layer(&root, b.width, b.height, scale, (0.16, 0.18, 0.24), out)
+        render_layer(&root, b.width, b.height, scale, Some((0.16, 0.18, 0.24)), out)
     });
     eprintln!("snapshot-launcher: wrote={ok:?}");
 }

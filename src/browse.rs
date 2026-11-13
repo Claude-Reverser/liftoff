@@ -3674,6 +3674,22 @@ pub fn snapshot(path: &str, out: &str, script: &str) {
                     None => eprintln!("snapshot: motion has no presentation layer off-screen"),
                 }
             }
+            // for screenshots that go public: no mounted disks in the sidebar, and the path
+            // bar starts at the home folder instead of the real one above it
+            "novolumes" => {
+                m(|s| s.places.retain(|p| !p.path.starts_with("/Volumes/")));
+                u.side.reloadData();
+                chrome(&u);
+            }
+            "homecrumbs" => {
+                let h = home();
+                let items = u.path.pathItems();
+                let at = (0..items.count()).find(|&i| items.objectAtIndex(i).URL().and_then(|x| x.path()).is_some_and(|p| p.to_string() == h));
+                if let Some(at) = at {
+                    let keep: Vec<Retained<objc2_app_kit::NSPathControlItem>> = (at..items.count()).map(|i| items.objectAtIndex(i)).collect();
+                    u.path.setPathItems(&NSArray::from_retained_slice(&keep));
+                }
+            }
             // goes to a place and reads the sidebar highlight part way through its trip
             "pill" => {
                 let before = u.side_pill.layer().map(|l| l.position().y);
@@ -3745,6 +3761,10 @@ pub fn snapshot(path: &str, out: &str, script: &str) {
                 }
             }
             "where" => {
+                let side = u.side.enclosingScrollView().map(|v| v.convertRect_toView(v.bounds(), None));
+                let grid = u.grid_scroll.convertRect_toView(u.grid_scroll.bounds(), None);
+                let table = u.side.convertRect_toView(u.side.bounds(), None);
+                eprintln!("snapshot: where side {side:?} table {table:?} grid {grid:?} grid visible {:?}", u.grid.visibleRect());
                 let st = u.stage.convertRect_toView(u.stage.bounds(), None);
                 let p = u.path.convertRect_toView(u.path.bounds(), None);
                 eprintln!(
